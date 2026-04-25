@@ -1,0 +1,79 @@
+spec_version: 1
+
+name: powergrid_env
+display_name: "Power Grid Microgrid Balancing"
+version: "1.0.0"
+description: >
+  LLM training environment for real-world energy management.
+  An agent manages battery storage and flexible load scheduling
+  across a 24-hour residential microgrid to minimise electricity
+  costs while maximising solar utilisation and grid stability.
+  96 steps × 15-min intervals. Dense reward signal every step.
+
+type: space
+theme: world_modeling_professional
+
+runtime: fastapi
+app: server.app:app
+port: 8000
+
+author: "Meta Hackathon Team"
+license: MIT
+
+tags:
+  - power-systems
+  - energy-management
+  - battery-control
+  - long-horizon
+  - real-world
+
+action_space:
+  type: continuous
+  fields:
+    battery_action:
+      type: float
+      range: [-1.0, 1.0]
+      description: "Fraction of max battery power. Negative = discharge, positive = charge."
+    curtailment:
+      type: float
+      range: [0.0, 1.0]
+      description: "Fraction of flexible load to shed (0 = none)."
+
+observation_space:
+  fields:
+    step: {type: int, range: [0, 95]}
+    hour: {type: float, range: [0, 24]}
+    solar_kw: {type: float, unit: kW}
+    demand_kw: {type: float, unit: kW}
+    flexible_demand_kw: {type: float, unit: kW}
+    battery_soc: {type: float, range: [0, 1]}
+    battery_power_kw: {type: float, unit: kW}
+    electricity_price: {type: float, unit: "$/kWh"}
+    grid_import_kw: {type: float, unit: kW}
+    grid_export_kw: {type: float, unit: kW}
+    episode_cost_usd: {type: float, unit: "$"}
+    episode_curtailed_kwh: {type: float, unit: kWh}
+    episode_solar_used_kwh: {type: float, unit: kWh}
+    done: {type: bool}
+    reward: {type: float}
+    context: {type: str, description: "Human-readable summary for LLM agents"}
+
+reward:
+  description: >
+    Dense per-step reward = -energy_cost + renewable_bonus - curtailment_penalty - stability_penalty.
+    Terminal bonus (up to +5) for high solar utilisation and low cumulative cost.
+  components:
+    energy_cost: "Negative of (grid_import × price × dt)"
+    curtailment_penalty: "−0.50 $/kWh of shed load"
+    renewable_bonus: "+0.05 × solar_fraction × solar_kw × dt"
+    stability_penalty: "−0.5 when battery SoC near hard limits"
+    terminal_bonus: "Up to +5 at episode end based on solar ratio and cost"
+
+episode:
+  length: 96
+  dt_hours: 0.25
+  horizon_hours: 24
+
+config:
+  PROFILE_NOISE: {type: float, default: 0.05, description: "Gaussian noise on solar/load profiles"}
+  SEED: {type: int, default: null, description: "Random seed for reproducibility"}
