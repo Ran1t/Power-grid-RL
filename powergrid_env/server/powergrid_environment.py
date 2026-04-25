@@ -45,6 +45,9 @@ CURTAILMENT_PENALTY_PER_KWH: float = 0.50  # $/kWh shed (discomfort cost)
 STEPS_PER_DAY: int = 96                 # 24 h × 4 steps/h
 DT: float = 0.25                        # hours per step
 
+# Reward normalisation — worst-case net cost per step (max import x peak price x dt)
+_MAX_STEP_COST: float = GRID_MAX_IMPORT_KW * 0.30 * DT  # 50 * 0.30 * 0.25 = 3.75
+
 # Time-of-use price tiers  ($/kWh)
 _PRICE_OFF_PEAK: float = 0.08
 _PRICE_MID_PEAK: float = 0.15
@@ -158,6 +161,7 @@ class PowerGridEnvironment:
         self._solar: list[float] = []
         self._load: list[float] = []
         self._price: list[float] = []
+        self._soc_trajectory: list[float] = []
 
     # ------------------------------------------------------------------
     def reset(self) -> GridObservation:
@@ -168,6 +172,7 @@ class PowerGridEnvironment:
         self._episode_curtailed_kwh = 0.0
         self._episode_solar_used_kwh = 0.0
         self._done = False
+        self._soc_trajectory = []
 
         # Generate fresh profiles with noise
         self._solar = [_solar_profile(t, self.profile_noise) for t in range(STEPS_PER_DAY)]
@@ -222,8 +227,8 @@ class PowerGridEnvironment:
         if grid_import_kw > GRID_MAX_IMPORT_KW:
             grid_import_kw = GRID_MAX_IMPORT_KW
 
-        # ---- Reward computation ----
-        r_cost, r_curtail, r_renewable, r_stability = self._compute_reward(
+        # ---- Reward computation (all components in [0, 1]) ----
+        r_cost, r_service, r_solar, r_stability = self._compute_reward(
             solar_kw=solar_kw,
             load_kw=load_kw,
             load_served_kw=load_served_kw,
@@ -234,23 +239,25 @@ class PowerGridEnvironment:
             new_soc=new_soc,
             price=price,
         )
-        reward = r_cost + r_curtail + r_renewable + r_stability
+        # Weighted combination → [0, 1]
+        reward = 0.60 * r_cost + 0.20 * r_solar + 0.10 * r_service + 0.10 * r_stability
 
         # ---- State update ----
         self._battery_soc = new_soc
-        self._episode_cost += (-r_cost)           # r_cost is negative
+        self._soc_trajectory.append(new_soc)
+        net_cost = grid_import_kw * price * DT - grid_export_kw * price * GRID_EXPORT_PRICE_RATIO * DT
+        self._episode_cost += max(0.0, net_cost)
         self._episode_curtailed_kwh += curtailed_kw * DT
         solar_used = min(solar_kw, load_served_kw + max(0.0, battery_power_kw))
         self._episode_solar_used_kwh += solar_used * DT
         self._step += 1
 
-        # Terminal condition: last step of the day
+        # Terminal condition: small solar bonus, final reward still in [0, 1]
         terminal_bonus = 0.0
         if self._step >= STEPS_PER_DAY:
             self._done = True
-            # Bonus for completing day with low cost and high solar utilisation
             terminal_bonus = self._terminal_bonus()
-            reward += terminal_bonus
+            reward = min(1.0, reward + terminal_bonus)
 
         obs = self._make_obs(
             battery_power_kw=battery_power_kw,
@@ -258,8 +265,8 @@ class PowerGridEnvironment:
             grid_export_kw=grid_export_kw,
             reward=reward,
             r_cost=r_cost,
-            r_curtail=r_curtail,
-            r_renewable=r_renewable,
+            r_curtail=r_service,
+            r_renewable=r_solar,
             r_stability=r_stability,
         )
 
@@ -283,6 +290,21 @@ class PowerGridEnvironment:
             episode_cost_usd=self._episode_cost,
             done=self._done,
         )
+
+    # ------------------------------------------------------------------
+    def episode_summary(self) -> dict:
+        """Return stats needed by task graders. Call after done=True."""
+        total_solar_kwh = sum(self._solar) * DT
+        return {
+            "episode_id":             self._episode_id,
+            "episode_cost_usd":       self._episode_cost,
+            "episode_solar_used_kwh": self._episode_solar_used_kwh,
+            "total_solar_kwh":        total_solar_kwh,
+            "episode_curtailed_kwh":  self._episode_curtailed_kwh,
+            "soc_trajectory":         list(self._soc_trajectory),
+            "steps_completed":        self._step,
+            "done":                   self._done,
+        }
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -326,40 +348,42 @@ class PowerGridEnvironment:
         new_soc: float,
         price: float,
     ) -> Tuple[float, float, float, float]:
-        """Return (r_cost, r_curtail, r_renewable, r_stability)."""
+        """
+        Return (r_cost, r_service, r_solar, r_stability) all in [0.0, 1.0].
 
-        # 1. Energy cost (negative reward)
-        import_cost = grid_import_kw * price * DT
-        export_revenue = grid_export_kw * price * GRID_EXPORT_PRICE_RATIO * DT
-        r_cost = -(import_cost - export_revenue)
+        r_cost      — cost efficiency: 1 = zero net cost, 0 = max possible import at peak
+        r_service   — load service:    1 = no curtailment,  0 = all flexible load shed
+        r_solar     — solar capture:   1 = all solar used,  0 = all solar exported unused
+        r_stability — battery health:  1 = SoC far from limits, 0 = at hard limit
+        """
+        # 1. Cost efficiency [0, 1]
+        net_cost = grid_import_kw * price * DT - grid_export_kw * price * GRID_EXPORT_PRICE_RATIO * DT
+        r_cost = max(0.0, min(1.0, 1.0 - net_cost / _MAX_STEP_COST))
 
-        # 2. Curtailment penalty (discomfort)
-        r_curtail = -(curtailed_kw * DT * CURTAILMENT_PENALTY_PER_KWH)
+        # 2. Load service [0, 1]  (penalises curtailment)
+        r_service = min(1.0, load_served_kw / max(load_kw, 0.01))
 
-        # 3. Renewable utilisation bonus
+        # 3. Solar capture [0, 1]
         if solar_kw > 0.5:
-            solar_fraction = min(1.0, (solar_kw - grid_export_kw) / solar_kw)
-            r_renewable = 0.05 * solar_fraction * solar_kw * DT
+            r_solar = max(0.0, min(1.0, (solar_kw - grid_export_kw) / solar_kw))
         else:
-            r_renewable = 0.0
+            r_solar = 1.0   # no sun available → full marks
 
-        # 4. Stability: penalise SoC near hard limits (battery stress)
+        # 4. Battery health [0, 1]
         soc_margin = min(new_soc - BATTERY_SOC_MIN, BATTERY_SOC_MAX - new_soc)
-        r_stability = 0.0 if soc_margin > 0.05 else -0.5 * (0.05 - soc_margin) / 0.05
+        r_stability = max(0.0, min(1.0, soc_margin / 0.10))
 
-        return r_cost, r_curtail, r_renewable, r_stability
+        return r_cost, r_service, r_solar, r_stability
 
     def _terminal_bonus(self) -> float:
-        """End-of-episode bonus rewarding low cost and good solar utilisation."""
+        """End-of-episode solar utilisation bonus, in [0.0, 0.05]."""
         total_solar_kwh = sum(self._solar) * DT
         solar_ratio = (
             self._episode_solar_used_kwh / total_solar_kwh
-            if total_solar_kwh > 0
-            else 0.0
+            if total_solar_kwh > 0.0
+            else 1.0
         )
-        # Bonus up to +5 for high solar use, penalise proportionally to cost
-        bonus = 5.0 * solar_ratio - 0.1 * self._episode_cost
-        return max(-2.0, min(5.0, bonus))
+        return 0.05 * max(0.0, min(1.0, solar_ratio))
 
     def _make_obs(
         self,

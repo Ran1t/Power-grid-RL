@@ -77,3 +77,49 @@ episode:
 config:
   PROFILE_NOISE: {type: float, default: 0.05, description: "Gaussian noise on solar/load profiles"}
   SEED: {type: int, default: null, description: "Random seed for reproducibility"}
+
+tasks:
+  - task_id: cost_minimization
+    difficulty: easy
+    seed: 42
+    description: >
+      Minimize 24-hour electricity cost using battery charge/discharge arbitrage.
+      Score = normalized cost reduction. 0.0 = random baseline ($60), 1.0 = optimal ($10).
+    scoring:
+      cost: 1.0
+    endpoints:
+      reset: POST /reset?task_id=cost_minimization
+      grade: GET /grade/cost_minimization
+
+  - task_id: solar_arbitrage
+    difficulty: medium
+    seed: 77
+    description: >
+      Maximize solar self-consumption AND minimize grid import on a high-solar summer day.
+      Requires timing battery charging to capture midday surplus and discharge at evening peak.
+    scoring:
+      cost:  0.6
+      solar: 0.4
+    endpoints:
+      reset: POST /reset?task_id=solar_arbitrage
+      grade: GET /grade/solar_arbitrage
+
+  - task_id: full_dispatch
+    difficulty: hard
+    seed: 13
+    description: >
+      Full multi-objective dispatch on a winter day with limited solar.
+      Optimize cost, solar capture, avoid curtailment, and keep SoC in healthy range.
+    scoring:
+      cost:        0.40
+      solar:       0.30
+      curtailment: 0.15
+      stability:   0.15
+    endpoints:
+      reset: POST /reset?task_id=full_dispatch
+      grade: GET /grade/full_dispatch
+
+grader:
+  score_range: [0.0, 1.0]
+  endpoint: GET /grade/{task_id}
+  requires_done: true

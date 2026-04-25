@@ -6,7 +6,13 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebFetch(domain:meta-pytorch.org)",
       "Bash(python -c ' *)",
-      "Bash(pip show *)"
+      "Bash(pip show *)",
+      "Bash(pip install *)",
+      "Bash(python visualize.py)",
+      "Bash(python -c \"import sys; sys.stdout.reconfigure\\(encoding='utf-8'\\)\")",
+      "WebFetch(domain:api.github.com)",
+      "Bash(python run_baselines.py --episodes 30)",
+      "Bash(python run_baselines.py)"
     ]
   }
 }
