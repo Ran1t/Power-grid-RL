@@ -104,11 +104,12 @@ Real data from 30 evaluation episodes (NREL load profiles + clear-sky solar):
 
 | Agent | Avg Score [0-1] | Avg Cost ($/day) | Notes |
 |---|---|---|---|
-| Random | 0.8712 | $52.00 | Lower bound |
-| Conservative (do-nothing) | 0.9288 | $41.61 | Passive upper bound |
+| Random | 0.882 | $52.00 | Lower bound |
+| Conservative (do-nothing) | 0.930 | $41.61 | Passive upper bound |
+| Rule-based | 0.910 | $40.00 | Heuristic baseline |
 | Q-Learning (trained 200 ep) | 0.8561 | $45.66 | Tabular RL baseline |
 | SARSA (trained 200 ep) | 0.8486 | $40.44 | On-policy RL baseline |
-| **GRPO LLM target** | **> 0.93** | **< $40** | Beat conservative |
+| **GRPO LLM (Qwen2.5-1.5B)** | **0.833** | **TBD** | Fine-tuned with GRPO |
 
 **Baseline comparison — score distribution and cost:**
 
@@ -143,6 +144,13 @@ To run training and generate real GRPO curves:
 training/train_powergrid.ipynb
 ```
 After running, commit `powergrid_results.png` to the repo.
+
+### GRPO Results
+
+![GRPO Training Results](powergrid_results.png)
+*Left: Score comparison across all agents. Middle: GRPO reward curve over 600 training steps. Right: Rule-based agent 24-hour episode trace.*
+
+**Trained model:** [Ran1t/powergrid-grpo-qwen2.5-1.5b](https://huggingface.co/Ran1t/powergrid-grpo-qwen2.5-1.5b)
 
 ---
 
