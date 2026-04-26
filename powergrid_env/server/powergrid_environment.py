@@ -25,6 +25,16 @@ try:
 except ImportError:
     from models import GridAction, GridObservation, GridState
 
+# OpenEnv base class — used when available, falls back to plain object
+try:
+    from openenv_core import Environment as _BaseEnv
+except ImportError:
+    try:
+        from openenv.core import Environment as _BaseEnv
+    except ImportError:
+        class _BaseEnv:  # type: ignore[no-redef]
+            """Stub when openenv is not installed."""
+
 
 # ---------------------------------------------------------------------------
 # Microgrid parameters
@@ -124,9 +134,9 @@ def _context_text(
 # Environment class
 # ---------------------------------------------------------------------------
 
-class PowerGridEnvironment:
+class PowerGridEnvironment(_BaseEnv):
     """
-    OpenEnv-compatible microgrid environment.
+    OpenEnv microgrid environment (extends Environment base class).
 
     reset() → GridObservation
     step(action) → (GridObservation, float, bool, dict)

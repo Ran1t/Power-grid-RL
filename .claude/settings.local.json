@@ -12,7 +12,12 @@
       "Bash(python -c \"import sys; sys.stdout.reconfigure\\(encoding='utf-8'\\)\")",
       "WebFetch(domain:api.github.com)",
       "Bash(python run_baselines.py --episodes 30)",
-      "Bash(python run_baselines.py)"
+      "Bash(python run_baselines.py)",
+      "Bash(python -c \"import json; f=open\\('train_powergrid.ipynb'\\); print\\(f.read\\(100\\)\\)\")",
+      "Bash(python generate_nb.py)",
+      "Bash(del \"d:\\\\Meta Hackathon\\\\Power grid\\\\training\\\\generate_nb.py\")",
+      "Bash(python -c \"import json; nb=json.load\\(open\\(r'd:/Meta Hackathon/Power grid/training/train_powergrid.ipynb'\\)\\); [print\\(i, repr\\(c['source'][:80] if isinstance\\(c['source'],str\\) else ''.join\\(c['source']\\)[:80]\\)\\) for i,c in enumerate\\(nb['cells']\\)]\")",
+      "Bash(python -)"
     ]
   }
 }

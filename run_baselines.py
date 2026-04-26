@@ -107,13 +107,16 @@ class GridEnv:
 # ── Episode runners ───────────────────────────────────────────────────────────
 
 def train_episode(env, agent, solar, load, price, seed):
-    """Run one training episode, calling agent.update() after every step."""
-    obs = env.reset(solar, load, price, seed=seed)
+    """Run one training episode, calling agent.update(). Returns avg step score."""
+    obs          = env.reset(solar, load, price, seed=seed)
+    step_rewards = []
     while not obs.done:
-        batt, curt   = agent.act(obs)
-        next_obs, r, done, _ = env.step(batt, curt)
+        batt, curt            = agent.act(obs)
+        next_obs, r, done, _  = env.step(batt, curt)
         agent.update(r, next_obs, done)
+        step_rewards.append(r)
         obs = next_obs
+    return statistics.mean(step_rewards) if step_rewards else 0.0
 
 
 def run_episode(env, agent, solar, load, price, seed, verbose=False):
@@ -215,6 +218,8 @@ def main():
     agents = [cls() for cls in ALL_AGENTS]
     results_by_agent = {}
 
+    training_curves = {}   # agent_name -> list of per-episode training scores
+
     for agent in agents:
         _sep("=", 80)
         print(f"  Agent: {agent.name}")
@@ -222,9 +227,12 @@ def main():
         # Train RL agents
         if hasattr(agent, "training") and agent.training:
             print(f"  Training for {args.train} episodes...")
+            ep_train_scores = []
             for ep, (solar, load, price) in enumerate(train_data):
-                train_episode(env, agent, solar, load, price,
-                              seed=args.seed + 9999 + ep)
+                score = train_episode(env, agent, solar, load, price,
+                                      seed=args.seed + 9999 + ep)
+                ep_train_scores.append(score)
+            training_curves[agent.name] = ep_train_scores
             agent.set_eval()
             print(f"  Training complete. Evaluating...\n")
         else:
@@ -263,8 +271,74 @@ def main():
 
     try:
         _plot(results_by_agent, eval_data, args.out)
+        _plot_training_curves(training_curves, args.out)
     except Exception as e:
         print(f"\n[Warning] Plot failed: {e}")
+
+
+# ── Training curve plot ───────────────────────────────────────────────────────
+
+def _plot_training_curves(training_curves: dict, eval_out_path: str):
+    """Save RL training reward curves — real evidence of learning."""
+    if not training_curves:
+        return
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out_dir  = os.path.dirname(eval_out_path) if os.path.dirname(eval_out_path) else "."
+    out_path = os.path.join(out_dir, "training_curves.png")
+    os.makedirs(out_dir, exist_ok=True)
+
+    COLORS = {"Q-Learning": "#3498db", "SARSA": "#2ecc71"}
+    WINDOW = 10
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig.patch.set_facecolor("#0f1117")
+    fig.suptitle("RL Agent Training Curves — Score [0-1] per Training Episode",
+                 color="white", fontsize=13, fontweight="bold")
+
+    def ax_style(ax, title, xlabel="", ylabel=""):
+        ax.set_facecolor("#1a1d27")
+        ax.tick_params(colors="white", labelsize=9)
+        for sp in ax.spines.values(): sp.set_edgecolor("#2a2d3a")
+        ax.set_title(title, color="white", fontsize=11, pad=6)
+        if xlabel: ax.set_xlabel(xlabel, color="#aaaaaa", fontsize=9)
+        if ylabel: ax.set_ylabel(ylabel, color="#aaaaaa", fontsize=9)
+        ax.grid(True, color="#2a2d3a", linewidth=0.5, alpha=0.7)
+
+    # -- Plot 1: raw + smoothed training scores --------------------------------
+    ax = axes[0]
+    ax_style(ax, "Training Score per Episode (raw + smoothed)",
+             "Training episode", "Avg step score [0-1]")
+    for name, scores in training_curves.items():
+        col = COLORS.get(name, "#ffffff")
+        eps = range(1, len(scores) + 1)
+        ax.plot(eps, scores, color=col, alpha=0.25, linewidth=0.8)
+        if len(scores) >= WINDOW:
+            ma = np.convolve(scores, np.ones(WINDOW)/WINDOW, mode='valid')
+            ax.plot(range(WINDOW, len(scores)+1), ma, color=col,
+                    linewidth=2.2, label=f"{name} ({WINDOW}-ep MA)")
+        else:
+            ax.plot(eps, scores, color=col, linewidth=2.2, label=name)
+    ax.set_ylim(0, 1)
+    ax.legend(facecolor="#1a1d27", labelcolor="white", fontsize=9)
+
+    # -- Plot 2: cumulative average (learning progress) -----------------------
+    ax = axes[1]
+    ax_style(ax, "Cumulative Avg Score (learning progress)",
+             "Training episode", "Cumulative avg score [0-1]")
+    for name, scores in training_curves.items():
+        col    = COLORS.get(name, "#ffffff")
+        cumavg = [statistics.mean(scores[:i+1]) for i in range(len(scores))]
+        ax.plot(range(1, len(cumavg)+1), cumavg, color=col,
+                linewidth=2.5, label=name)
+    ax.set_ylim(0, 1)
+    ax.legend(facecolor="#1a1d27", labelcolor="white", fontsize=9)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
+    plt.savefig(out_path, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
+    print(f"Training curves saved: {out_path}")
 
 
 # ── Plot ──────────────────────────────────────────────────────────────────────

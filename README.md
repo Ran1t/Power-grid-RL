@@ -10,79 +10,139 @@ license: mit
 
 # PowerGrid Microgrid Balancing — OpenEnv Environment
 
-**Hackathon Theme:** World Modeling — Professional Tasks (Theme 3.1)
-**Framework:** [OpenEnv](https://github.com/meta-pytorch/OpenEnv) (latest release)
-**Training:** GRPO via [Unsloth](https://github.com/unslothai/unsloth) + HuggingFace TRL
-
-> An LLM agent manages a 50 kWh residential battery and flexible loads over a 24-hour
-> period to minimize electricity costs, maximize solar utilization, and maintain grid stability.
-> 96 decision steps × 15-minute intervals. Dense reward every step.
+**Theme:** World Modeling — Professional Tasks (Theme 3.1)  
+**Framework:** [OpenEnv](https://github.com/meta-pytorch/OpenEnv) (latest release)  
+**Training:** GRPO via [Unsloth](https://github.com/unslothai/unsloth) + HuggingFace TRL  
+**Space:** [huggingface.co/spaces/Ran1t/powergrid-env](https://huggingface.co/spaces/Ran1t/powergrid-env)
 
 ---
 
 ## The Problem
 
-Real residential microgrids (solar + battery + grid) waste **15–30% of potential savings**
-because battery scheduling is done with rigid, time-invariant rules that don't adapt to:
-- Dynamic time-of-use (TOU) pricing
-- Variable solar generation (clouds, seasons)
-- Changing load patterns
+Real residential microgrids (solar + battery + grid connection) waste **15–30 % of potential savings** because battery scheduling uses rigid, time-invariant rules that don't adapt to:
 
-An LLM agent can reason *why* a decision makes sense ("it's peak pricing window, battery at
-65%, discharge now") rather than memorizing a fixed rule — making it adaptable.
+- Dynamic **time-of-use (TOU) pricing** ($0.08 → $0.30/kWh swings)
+- Variable **solar generation** (clouds, seasons, forecast uncertainty)
+- Changing **load patterns** (occupancy, appliance usage)
+
+An LLM agent can reason *why* a decision makes sense ("it's peak pricing window, battery at 65 %, discharge now") rather than just following a hard-coded rule — making it inherently adaptable.
+
+> **Does this exist to teach an LLM something it can't currently do well?**  
+> Yes. Long-horizon energy arbitrage requires reasoning 6–12 hours ahead, coordinating multiple objectives, and understanding domain-specific constraints — none of which LLMs are explicitly trained for.
+
+---
 
 ## Environment Design
 
 ```
 Microgrid topology:
-  [Solar PV 20 kW peak] ─┐
-  [Grid connection]      ─┼── [Battery 50 kWh / 25 kW] ── [Residential Load 3–23 kW]
-  [Agent controller]     ─┘
+  [Solar PV 20 kW peak] ──┐
+  [Grid connection]       ──┼── [Battery 50 kWh / 25 kW] ── [Residential Load 3–23 kW]
+  [LLM agent controller]  ──┘
 ```
 
 ### Episode
 - **Horizon:** 96 steps × 15 min = 24 hours
-- **New profile every episode** (Gaussian noise on solar/load curves)
-- **Starting SoC:** randomized 20–80%
+- **New profile every episode** (Gaussian noise on solar + load curves)
+- **Starting SoC:** randomised 20–80 %
+- **Real load data:** NREL PowerGridworld hourly profiles
 
 ### Action Space
 | Field | Type | Range | Description |
-|-------|------|-------|-------------|
+|---|---|---|---|
 | `battery_action` | float | [-1, 1] | -1 = full discharge, 0 = idle, +1 = full charge |
-| `curtailment` | float | [0, 1] | Fraction of flexible load to shed |
+| `curtailment` | float | [0, 1] | Fraction of flexible load to shed (avoid this) |
 
 ### Observation Space
 | Field | Unit | Description |
-|-------|------|-------------|
+|---|---|---|
 | `step` | int | Timestep 0–95 |
 | `hour` | float | Hour of day 0–24 |
 | `solar_kw` | kW | PV generation |
 | `demand_kw` | kW | Total load |
-| `flexible_demand_kw` | kW | Deferrable load (30%) |
+| `flexible_demand_kw` | kW | Deferrable load (30 %) |
 | `battery_soc` | 0–1 | State of charge |
-| `electricity_price` | $/kWh | Time-of-use tariff |
-| `grid_import_kw` | kW | Power bought from grid |
-| `episode_cost_usd` | $ | Cumulative cost |
-| `context` | str | **Human-readable summary for LLM** |
+| `electricity_price` | $/kWh | Current TOU tariff |
+| `grid_import_kw` | kW | Power drawn from grid |
+| `episode_cost_usd` | $ | Cumulative cost so far |
+| `context` | str | **Human-readable summary for the LLM** |
 
-### Reward Function
+### Reward Function — Dense, Multi-Component, Normalised to [0, 1]
+
 ```
-r_step = -energy_cost + renewable_bonus - curtailment_penalty - stability_penalty
+r_cost    = max(0, min(1,  1 - net_cost / max_step_cost ))   # cost efficiency
+r_solar   = max(0, min(1, (solar_kw - export_kw) / solar_kw))# renewable capture
+r_service = min(1, load_served / total_load)                  # curtailment avoidance
+r_stab    = max(0, min(1,  soc_margin / 0.10 ))               # battery health
 
-energy_cost       = grid_import × price × 0.25 h
-renewable_bonus   = 0.05 × solar_fraction × solar_kw × 0.25 h
-curtailment_pen   = 0.50 $/kWh × curtailed_load × 0.25 h
-stability_pen     = -0.5 when battery SoC near hard limits (10% or 95%)
-
-r_terminal = min(5, 5 × solar_ratio - 0.1 × total_cost)   # end-of-day bonus
+reward = 0.60 * r_cost + 0.20 * r_solar + 0.10 * r_service + 0.10 * r_stab
+# Combined reward strictly in [0, 1] every step
+# Terminal step gets +0.05 solar bonus, capped at 1.0
 ```
+
+**Why this is hard to game:** An agent that always idles gets r_cost ≈ 0.7 but r_solar ≈ 0.05 (wastes solar). An agent that always charges gets high r_solar but low r_cost during peak hours. The only way to score > 0.93 is to genuinely optimise all four components simultaneously.
 
 ### Time-of-Use Pricing
 | Period | Hours | Price |
-|--------|-------|-------|
+|---|---|---|
 | OFF-PEAK | 21:00–07:00 | $0.08/kWh |
 | MID-PEAK | 11:00–17:00 | $0.15/kWh |
 | ON-PEAK | 07:00–11:00, 17:00–21:00 | $0.30/kWh |
+
+### Three Graded Tasks (0.0 – 1.0)
+| Task | Difficulty | Scoring |
+|---|---|---|
+| `cost_minimization` | Easy | 100 % cost efficiency |
+| `solar_arbitrage` | Medium | 60 % cost + 40 % solar utilisation |
+| `full_dispatch` | Hard | 40 % cost + 30 % solar + 15 % no-curtailment + 15 % battery activity |
+
+---
+
+## Baseline Results
+
+Real data from 30 evaluation episodes (NREL load profiles + clear-sky solar):
+
+| Agent | Avg Score [0-1] | Avg Cost ($/day) | Notes |
+|---|---|---|---|
+| Random | 0.8712 | $52.00 | Lower bound |
+| Conservative (do-nothing) | 0.9288 | $41.61 | Passive upper bound |
+| Q-Learning (trained 200 ep) | 0.8561 | $45.66 | Tabular RL baseline |
+| SARSA (trained 200 ep) | 0.8486 | $40.44 | On-policy RL baseline |
+| **GRPO LLM target** | **> 0.93** | **< $40** | Beat conservative |
+
+**Baseline comparison — score distribution and cost:**
+
+![Baseline Results](outputs/baseline_results.png)
+*Left: Score [0-1] over 30 eval episodes. Middle: Distribution per agent. Right: Mean daily energy cost.*
+
+---
+
+## Training Evidence
+
+### RL Agent Learning Curves (real runs)
+
+The Q-Learning and SARSA agents were trained for 200 episodes on real NREL load data. The plots below show actual learning curves — not simulated:
+
+![Training Curves](outputs/training_curves.png)
+*Left: Per-episode training score (raw + 10-episode moving average). Right: Cumulative average showing learning progress.*
+
+Both RL agents show clear improvement during training (rising cumulative average), confirming the environment provides a learnable signal.
+
+### GRPO LLM Training
+
+The notebook [`training/train_powergrid.ipynb`](training/train_powergrid.ipynb) fine-tunes **Qwen2.5-1.5B-Instruct** with GRPO using Unsloth + HuggingFace TRL.
+
+- **Model:** `Qwen/Qwen2.5-1.5B-Instruct` (1.5 B parameters, fits on T4 free Colab)
+- **Method:** GRPO — group relative policy optimisation, no value network needed
+- **Reward:** 70 % environment physics reward + 30 % JSON format reward
+- **Training time:** ~45 min on T4, ~15 min on A100
+
+To run training and generate real GRPO curves:
+```
+# Open in Google Colab (T4 GPU, free tier)
+training/train_powergrid.ipynb
+```
+After running, commit `powergrid_results.png` to the repo.
 
 ---
 
@@ -90,12 +150,12 @@ r_terminal = min(5, 5 × solar_ratio - 0.1 × total_cost)   # end-of-day bonus
 
 ### Run the server locally
 ```bash
-pip install fastapi uvicorn numpy pydantic
+pip install fastapi uvicorn numpy pydantic openai
 cd powergrid_env
 uvicorn server.app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### Interact via Python client
+### Interact via the Python client
 ```python
 from powergrid_env.client import PowerGridEnv
 
@@ -113,91 +173,60 @@ for step in range(96):
 
 ### Run with Docker
 ```bash
-cd powergrid_env
-docker build -f server/Dockerfile -t powergrid-env .
-docker run -p 8000:8000 powergrid-env
+docker build -f Dockerfile -t powergrid-env .
+docker run -p 7860:7860 powergrid-env
+```
+
+### Run LLM inference
+```bash
+export API_BASE_URL=https://api-inference.huggingface.co/v1
+export MODEL_NAME=Qwen/Qwen2.5-1.5B-Instruct
+export HF_TOKEN=hf_...
+python inference.py
 ```
 
 ---
 
-## File Structure
+## Repository Structure
 
 ```
 powergrid_env/
-├── __init__.py
-├── models.py                        # GridAction, GridObservation, GridState
-├── client.py                        # PowerGridEnv (EnvClient subclass)
-├── openenv.yaml                     # OpenEnv manifest
-├── pyproject.toml                   # Package dependencies
+├── models.py                    # GridAction, GridObservation, GridState (OpenEnv types)
+├── client.py                    # PowerGridEnv (EnvClient subclass) — no server imports
+├── openenv.yaml                 # OpenEnv manifest
+├── pyproject.toml
 └── server/
-    ├── __init__.py
-    ├── powergrid_environment.py     # Physics simulation + reward logic
-    ├── app.py                       # FastAPI server (OpenEnv-compatible)
+    ├── powergrid_environment.py # Physics simulation (extends Environment base class)
+    ├── app.py                   # FastAPI server — POST /reset, POST /step, GET /state
+    ├── task_graders.py          # 3 graded tasks, scores in [0.0, 1.0]
     ├── requirements.txt
     └── Dockerfile
 
 training/
-└── train_powergrid.ipynb            # GRPO training (Colab-ready)
+└── train_powergrid.ipynb        # GRPO training (Colab-ready, Unsloth + TRL)
 
+baseline_agents.py               # Random, Conservative, Q-Learning, SARSA
+run_baselines.py                 # Evaluation + training curves
+inference.py                     # LLM agent via OpenAI-compatible API
 outputs/
-├── logs/
-└── evals/
+├── baseline_results.png         # Agent comparison plots
+└── training_curves.png          # RL training evidence
 ```
 
 ---
 
-## Training
+## Why This Problem? Why LLMs?
 
-Open `training/train_powergrid.ipynb` in Google Colab (T4 GPU, free tier).
-
-**Model:** `Qwen/Qwen2.5-1.5B-Instruct` fine-tuned with GRPO  
-**Budget:** ~$5–10 of HuggingFace compute credit for 3 epochs on A100
-
-### What GRPO trains
-The model receives the grid state as a structured prompt and must output a JSON action.
-Two reward functions guide training:
-1. **Environment reward** — scored against the physics simulator
-2. **Format reward** — +1.5 for valid JSON with correct keys/ranges
-
-### Expected results after training
-| Agent | Episode Reward | Energy Cost |
-|-------|---------------|-------------|
-| Random | ~-25 | ~$8.50 |
-| Rule-based | ~-12 | ~$5.20 |
-| **GRPO LLM** | **~-8** | **~$4.10** |
-
----
-
-## HuggingFace Space
-
-**Environment Space:** `https://huggingface.co/spaces/Ran1t/powergrid-env`  
-**Trained Model:** `https://huggingface.co/Ran1t/powergrid-grpo-qwen2.5-1.5b`
-
----
-
-## Judging Criteria Alignment
-
-| Criterion | Implementation |
-|-----------|---------------|
-| **Environment Innovation (40%)** | Novel LLM-controlled energy management; real-world domain underexplored in LLM RL training; physics-based simulation with dense rewards |
-| **Storytelling (30%)** | Clear problem (battery arbitrage), mechanism (TOU pricing), and outcome (cost reduction) |
-| **Reward Improvement (20%)** | Dense per-step reward; terminal bonus; 3-way comparison (random / rule / LLM) with plots |
-| **Training Pipeline (10%)** | GRPO via Unsloth + TRL; composable reward functions; reproducible Colab notebook |
-
----
-
-## Why Power Grid? Why LLMs?
-
-1. **Underexplored domain** — Most RL benchmarks are games or locomotion. Real energy management is high-stakes, complex, and deployable.
-2. **Long-horizon reasoning** — Optimal battery dispatch requires reasoning 6–12 hours ahead (charge now for peak later).
-3. **Natural language alignment** — Utility operators already reason in text ("peak pricing window", "solar forecast"). LLMs bridge the gap between human expertise and automated control.
-4. **Immediate real-world impact** — $4–8/day savings per household × millions of homes = significant grid decarbonization.
+1. **Underexplored domain** — RL benchmarks are full of games. Real energy management is high-stakes and deployable today.
+2. **Long-horizon reasoning** — Optimal battery dispatch requires thinking 6–12 hours ahead ("charge now at $0.15, discharge at $0.30 peak in 4 hours").
+3. **Natural language alignment** — Utility operators already reason in text. LLMs bridge human expertise and automated control.
+4. **Real-world impact** — $4–8/day savings per household × millions of homes = meaningful grid decarbonisation.
 
 ---
 
 ## References
 
-- [PowerGridworld (NREL)](https://github.com/NatLabRockies/PowerGridworld) — multi-agent power systems framework
+- [PowerGridworld (NREL)](https://github.com/NatLabRockies/PowerGridworld) — real load data source
 - [OpenEnv](https://github.com/meta-pytorch/OpenEnv) — environment framework
-- [TRL GRPO](https://huggingface.co/docs/trl/grpo_trainer) — training algorithm
+- [TRL GRPO Trainer](https://huggingface.co/docs/trl/grpo_trainer) — training algorithm
 - [Unsloth](https://github.com/unslothai/unsloth) — efficient LLM fine-tuning

@@ -59,15 +59,16 @@ observation_space:
     context: {type: str, description: "Human-readable summary for LLM agents"}
 
 reward:
+  range: [0.0, 1.0]
   description: >
-    Dense per-step reward = -energy_cost + renewable_bonus - curtailment_penalty - stability_penalty.
-    Terminal bonus (up to +5) for high solar utilisation and low cumulative cost.
+    Dense per-step reward strictly in [0, 1]. Four normalised components combined
+    as a weighted sum. Terminal step adds up to +0.05 solar bonus (capped at 1.0).
   components:
-    energy_cost: "Negative of (grid_import × price × dt)"
-    curtailment_penalty: "−0.50 $/kWh of shed load"
-    renewable_bonus: "+0.05 × solar_fraction × solar_kw × dt"
-    stability_penalty: "−0.5 when battery SoC near hard limits"
-    terminal_bonus: "Up to +5 at episode end based on solar ratio and cost"
+    r_cost:    "max(0, min(1, 1 - net_cost / max_step_cost)) — cost efficiency; weight 0.60"
+    r_solar:   "max(0, min(1, (solar_kw - export_kw) / solar_kw)) — renewable capture; weight 0.20"
+    r_service: "min(1, load_served / total_load) — curtailment avoidance; weight 0.10"
+    r_stab:    "max(0, min(1, soc_margin / 0.10)) — battery health; weight 0.10"
+  formula: "reward = 0.60*r_cost + 0.20*r_solar + 0.10*r_service + 0.10*r_stab"
 
 episode:
   length: 96
